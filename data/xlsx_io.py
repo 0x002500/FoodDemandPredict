@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 from chinese_calendar import is_workday
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 from openpyxl.styles import PatternFill
 
 from predict.t0_forecaster import T0DemandPredictor
@@ -43,23 +45,30 @@ def _as_date(value: object, sheet_name: str) -> date:
     raise ValueError(f"工作表 {sheet_name} 的日期列包含非日期值: {value!r}")
 
 
-def _historical_rows(worksheet, columns: dict[str, int]) -> tuple[np.ndarray, np.ndarray, date]:
-    rows: list[tuple[date, float, float, float]] = []
+def _dish_columns(columns: dict[str, int]) -> dict[str, int]:
+    excluded = {DATE_COLUMN, TARGET_COLUMN, *COVARIATE_COLUMNS}
+    dishes = {name: index for name, index in columns.items() if name not in excluded}
+    if not dishes:
+        raise ValueError("未找到菜品销量列")
+    return dishes
+
+
+def _historical_rows(worksheet, columns: dict[str, int], dishes: dict[str, int]) -> tuple[np.ndarray, np.ndarray, date]:
+    rows: list[tuple[date, float, float, list[float]]] = []
     for row in range(2, worksheet.max_row + 1):
         raw_date = worksheet.cell(row, columns[DATE_COLUMN]).value
-        sales = worksheet.cell(row, columns[TARGET_COLUMN]).value
-        if raw_date is None or sales is None:
+        if raw_date is None:
             continue
         try:
-            rows.append((_as_date(raw_date, worksheet.title), float(sales), float(worksheet.cell(row, columns[COVARIATE_COLUMNS[0]]).value), float(worksheet.cell(row, columns[COVARIATE_COLUMNS[1]]).value)))
+            rows.append((_as_date(raw_date, worksheet.title), float(worksheet.cell(row, columns[COVARIATE_COLUMNS[0]]).value), float(worksheet.cell(row, columns[COVARIATE_COLUMNS[1]]).value), [float(worksheet.cell(row, column).value) for column in dishes.values()]))
         except (TypeError, ValueError) as error:
             raise ValueError(f"工作表 {worksheet.title} 第 {row} 行的数据不可用于预测") from error
     rows.sort(key=lambda item: item[0])
     if not rows:
         raise ValueError(f"工作表 {worksheet.title} 没有可用的历史销量")
-    sales = np.asarray([item[1] for item in rows], dtype=np.float32)
-    covariates = np.asarray([[item[2], item[3]] for item in rows], dtype=np.float32)
-    return sales, covariates, rows[-1][0]
+    histories = np.asarray([item[3] for item in rows], dtype=np.float32).T
+    covariates = np.asarray([[item[1], item[2]] for item in rows], dtype=np.float32)
+    return histories, covariates, rows[-1][0]
 
 
 def _future_covariates(last_date: date, days: int) -> tuple[list[date], np.ndarray]:
@@ -68,13 +77,16 @@ def _future_covariates(last_date: date, days: int) -> tuple[list[date], np.ndarr
     return dates, values
 
 
-def _append_rows(worksheet, columns: dict[str, int], dates: list[date], predicted: np.ndarray) -> None:
-    for current_date, sales in zip(dates, predicted, strict=True):
+def _append_rows(worksheet, columns: dict[str, int], dishes: dict[str, int], dates: list[date], predicted: np.ndarray) -> None:
+    for horizon_index, current_date in enumerate(dates):
         row = worksheet.max_row + 1
         worksheet.cell(row, columns[DATE_COLUMN], current_date).number_format = "yyyy-mm-dd"
         worksheet.cell(row, columns[COVARIATE_COLUMNS[0]], current_date.isoweekday())
         worksheet.cell(row, columns[COVARIATE_COLUMNS[1]], int(is_workday(current_date)))
-        worksheet.cell(row, columns[TARGET_COLUMN], round(max(0.0, float(sales)), 1)).number_format = "0.0"
+        for dish_index, column in enumerate(dishes.values()):
+            worksheet.cell(row, column, int(round(max(0.0, float(predicted[dish_index, horizon_index]))))).number_format = "0"
+        dish_cells = ",".join(f"{get_column_letter(column)}{row}" for column in dishes.values())
+        worksheet.cell(row, columns[TARGET_COLUMN], f"=SUM({dish_cells})").number_format = "0"
         for column in range(1, worksheet.max_column + 1):
             worksheet.cell(row, column).fill = FORECAST_FILL
 
@@ -101,15 +113,21 @@ def append_forecasts(input_path: Path, output_path: Path, *, days: int = 7, devi
     # Keep formulas and styles in the output workbook, but use Excel's cached
     # formula values for the historical target during inference.
     workbook = load_workbook(input_path)
+    if workbook.calculation is None:
+        workbook.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
+    else:
+        workbook.calculation.fullCalcOnLoad = True
+        workbook.calculation.forceFullCalc = True
     values_workbook = load_workbook(input_path, data_only=True)
     predictor = T0DemandPredictor(device=device)
     rows_written = 0
     for worksheet, values_worksheet in zip(workbook.worksheets, values_workbook.worksheets, strict=True):
         columns = _headers(worksheet)
-        history, historical_covariates, last_date = _historical_rows(values_worksheet, columns)
+        dishes = _dish_columns(columns)
+        histories, historical_covariates, last_date = _historical_rows(values_worksheet, columns, dishes)
         future_dates, future_covariates = _future_covariates(last_date, days)
-        forecast = predictor.predict(history, historical_covariates, future_covariates)
-        _append_rows(worksheet, columns, future_dates, forecast.median)
+        forecast = predictor.predict_many(histories, historical_covariates, future_covariates)
+        _append_rows(worksheet, columns, dishes, future_dates, forecast.median)
         rows_written += days
     _atomic_save(workbook, output_path)
     return ForecastWorkbookReport(output_path=output_path, forecast_rows=rows_written)
