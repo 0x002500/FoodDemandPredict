@@ -1,4 +1,4 @@
-"""Production XLSX input/output workflow for canteen total-sales forecasts."""
+"""Production XLSX input/output workflow for canteen dish-sales forecasts."""
 from __future__ import annotations
 
 import os
@@ -10,14 +10,12 @@ from pathlib import Path
 import numpy as np
 from chinese_calendar import is_workday
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 from openpyxl.workbook.properties import CalcProperties
 from openpyxl.styles import PatternFill
 
 from predict.t0_forecaster import T0DemandPredictor
 
 DATE_COLUMN = "日期"
-TARGET_COLUMN = "每日总销量"
 COVARIATE_COLUMNS = ("当周的第几天", "是否工作日")
 FORECAST_FILL = PatternFill(fill_type="solid", fgColor="DDEBF7")
 
@@ -30,7 +28,7 @@ class ForecastWorkbookReport:
 
 def _headers(worksheet) -> dict[str, int]:
     values = [cell.value for cell in worksheet[1]]
-    required = {DATE_COLUMN, TARGET_COLUMN, *COVARIATE_COLUMNS}
+    required = {DATE_COLUMN, *COVARIATE_COLUMNS}
     missing = required.difference(values)
     if missing:
         raise ValueError(f"工作表 {worksheet.title} 缺少列: {sorted(missing)}")
@@ -46,7 +44,7 @@ def _as_date(value: object, sheet_name: str) -> date:
 
 
 def _dish_columns(columns: dict[str, int]) -> dict[str, int]:
-    excluded = {DATE_COLUMN, TARGET_COLUMN, *COVARIATE_COLUMNS}
+    excluded = {DATE_COLUMN, *COVARIATE_COLUMNS}
     dishes = {name: index for name, index in columns.items() if name not in excluded}
     if not dishes:
         raise ValueError("未找到菜品销量列")
@@ -60,7 +58,10 @@ def _historical_rows(worksheet, columns: dict[str, int], dishes: dict[str, int])
         if raw_date is None:
             continue
         try:
-            rows.append((_as_date(raw_date, worksheet.title), float(worksheet.cell(row, columns[COVARIATE_COLUMNS[0]]).value), float(worksheet.cell(row, columns[COVARIATE_COLUMNS[1]]).value), [float(worksheet.cell(row, column).value) for column in dishes.values()]))
+            current_date = _as_date(raw_date, worksheet.title)
+            day_of_week = worksheet.cell(row, columns[COVARIATE_COLUMNS[0]]).value
+            workday = worksheet.cell(row, columns[COVARIATE_COLUMNS[1]]).value
+            rows.append((current_date, float(current_date.isoweekday() if day_of_week is None else day_of_week), float(int(is_workday(current_date)) if workday is None else workday), [float(worksheet.cell(row, column).value) for column in dishes.values()]))
         except (TypeError, ValueError) as error:
             raise ValueError(f"工作表 {worksheet.title} 第 {row} 行的数据不可用于预测") from error
     rows.sort(key=lambda item: item[0])
@@ -85,8 +86,6 @@ def _append_rows(worksheet, columns: dict[str, int], dishes: dict[str, int], dat
         worksheet.cell(row, columns[COVARIATE_COLUMNS[1]], int(is_workday(current_date)))
         for dish_index, column in enumerate(dishes.values()):
             worksheet.cell(row, column, int(round(max(0.0, float(predicted[dish_index, horizon_index]))))).number_format = "0"
-        dish_cells = ",".join(f"{get_column_letter(column)}{row}" for column in dishes.values())
-        worksheet.cell(row, columns[TARGET_COLUMN], f"=SUM({dish_cells})").number_format = "0"
         for column in range(1, worksheet.max_column + 1):
             worksheet.cell(row, column).fill = FORECAST_FILL
 

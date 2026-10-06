@@ -13,6 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from chinese_calendar import is_workday
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 
@@ -28,7 +29,7 @@ CHART_DIR = OUTPUT_DIR / "图表"
 TEST_DAYS = 5
 DATE_COLUMN = "日期"
 COVARIATE_COLUMNS = ("当周的第几天", "是否工作日")
-EXCLUDED_COLUMNS = {DATE_COLUMN, "每日总销量", *COVARIATE_COLUMNS}
+EXCLUDED_COLUMNS = {DATE_COLUMN, *COVARIATE_COLUMNS}
 
 
 @dataclass(frozen=True)
@@ -78,10 +79,16 @@ def read_sheet(worksheet) -> tuple[list[date], np.ndarray, dict[str, np.ndarray]
         value = worksheet.cell(row, columns[DATE_COLUMN]).value
         if value is None:
             continue
+        current_date = as_date(value)
+        day_of_week = worksheet.cell(row, columns[COVARIATE_COLUMNS[0]]).value
+        workday = worksheet.cell(row, columns[COVARIATE_COLUMNS[1]]).value
         records.append(
             (
-                as_date(value),
-                [float(worksheet.cell(row, columns[column]).value) for column in COVARIATE_COLUMNS],
+                current_date,
+                [
+                    float(current_date.isoweekday() if day_of_week is None else day_of_week),
+                    float(int(is_workday(current_date)) if workday is None else workday),
+                ],
                 {dish: float(worksheet.cell(row, columns[dish]).value) for dish in dishes},
             )
         )
