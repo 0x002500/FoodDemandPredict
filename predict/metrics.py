@@ -6,8 +6,9 @@ import numpy as np
 
 def calculate_metrics(actual: object, predicted: object) -> dict[str, float]:
     """Return point-forecast error metrics; MAPE omits zero actuals."""
-    actual_array, predicted_array = np.asarray(actual, dtype=float), np.asarray(
-        predicted, dtype=float
+    actual_array, predicted_array = (
+        np.asarray(actual, dtype=float),
+        np.asarray(predicted, dtype=float),
     )
     error = predicted_array - actual_array
     nonzero = actual_array != 0

@@ -1,4 +1,5 @@
 """Production XLSX input/output workflow for canteen dish-sales forecasts."""
+
 from __future__ import annotations
 
 import os
@@ -51,7 +52,9 @@ def _dish_columns(columns: dict[str, int]) -> dict[str, int]:
     return dishes
 
 
-def _historical_rows(worksheet, columns: dict[str, int], dishes: dict[str, int]) -> tuple[np.ndarray, np.ndarray, date]:
+def _historical_rows(
+    worksheet, columns: dict[str, int], dishes: dict[str, int]
+) -> tuple[np.ndarray, np.ndarray, date]:
     rows: list[tuple[date, float, float, list[float]]] = []
     for row in range(2, worksheet.max_row + 1):
         raw_date = worksheet.cell(row, columns[DATE_COLUMN]).value
@@ -61,9 +64,27 @@ def _historical_rows(worksheet, columns: dict[str, int], dishes: dict[str, int])
             current_date = _as_date(raw_date, worksheet.title)
             day_of_week = worksheet.cell(row, columns[COVARIATE_COLUMNS[0]]).value
             workday = worksheet.cell(row, columns[COVARIATE_COLUMNS[1]]).value
-            rows.append((current_date, float(current_date.isoweekday() if day_of_week is None else day_of_week), float(int(is_workday(current_date)) if workday is None else workday), [float(worksheet.cell(row, column).value) for column in dishes.values()]))
+            rows.append(
+                (
+                    current_date,
+                    float(
+                        current_date.isoweekday()
+                        if day_of_week is None
+                        else day_of_week
+                    ),
+                    float(
+                        int(is_workday(current_date)) if workday is None else workday
+                    ),
+                    [
+                        float(worksheet.cell(row, column).value)
+                        for column in dishes.values()
+                    ],
+                )
+            )
         except (TypeError, ValueError) as error:
-            raise ValueError(f"工作表 {worksheet.title} 第 {row} 行的数据不可用于预测") from error
+            raise ValueError(
+                f"工作表 {worksheet.title} 第 {row} 行的数据不可用于预测"
+            ) from error
     rows.sort(key=lambda item: item[0])
     if not rows:
         raise ValueError(f"工作表 {worksheet.title} 没有可用的历史销量")
@@ -74,25 +95,44 @@ def _historical_rows(worksheet, columns: dict[str, int], dishes: dict[str, int])
 
 def _future_covariates(last_date: date, days: int) -> tuple[list[date], np.ndarray]:
     dates = [last_date + timedelta(days=offset) for offset in range(1, days + 1)]
-    values = np.asarray([[current.isoweekday(), int(is_workday(current))] for current in dates], dtype=np.float32)
+    values = np.asarray(
+        [[current.isoweekday(), int(is_workday(current))] for current in dates],
+        dtype=np.float32,
+    )
     return dates, values
 
 
-def _append_rows(worksheet, columns: dict[str, int], dishes: dict[str, int], dates: list[date], predicted: np.ndarray) -> None:
+def _append_rows(
+    worksheet,
+    columns: dict[str, int],
+    dishes: dict[str, int],
+    dates: list[date],
+    predicted: np.ndarray,
+) -> None:
     for horizon_index, current_date in enumerate(dates):
         row = worksheet.max_row + 1
-        worksheet.cell(row, columns[DATE_COLUMN], current_date).number_format = "yyyy-mm-dd"
+        worksheet.cell(
+            row, columns[DATE_COLUMN], current_date
+        ).number_format = "yyyy-mm-dd"
         worksheet.cell(row, columns[COVARIATE_COLUMNS[0]], current_date.isoweekday())
-        worksheet.cell(row, columns[COVARIATE_COLUMNS[1]], int(is_workday(current_date)))
+        worksheet.cell(
+            row, columns[COVARIATE_COLUMNS[1]], int(is_workday(current_date))
+        )
         for dish_index, column in enumerate(dishes.values()):
-            worksheet.cell(row, column, int(round(max(0.0, float(predicted[dish_index, horizon_index]))))).number_format = "0"
+            worksheet.cell(
+                row,
+                column,
+                int(round(max(0.0, float(predicted[dish_index, horizon_index])))),
+            ).number_format = "0"
         for column in range(1, worksheet.max_column + 1):
             worksheet.cell(row, column).fill = FORECAST_FILL
 
 
 def _atomic_save(workbook, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".xlsx", delete=False) as temporary:
+    with tempfile.NamedTemporaryFile(
+        dir=output_path.parent, suffix=".xlsx", delete=False
+    ) as temporary:
         temp_path = Path(temporary.name)
     try:
         workbook.save(temp_path)
@@ -101,7 +141,9 @@ def _atomic_save(workbook, output_path: Path) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def append_forecasts(input_path: Path, output_path: Path, *, days: int = 7, device: str = "cpu") -> ForecastWorkbookReport:
+def append_forecasts(
+    input_path: Path, output_path: Path, *, days: int = 7, device: str = "cpu"
+) -> ForecastWorkbookReport:
     """Read a source workbook and write a new workbook with blue forecast rows."""
     if days < 1:
         raise ValueError("days 必须大于 0")
@@ -113,19 +155,27 @@ def append_forecasts(input_path: Path, output_path: Path, *, days: int = 7, devi
     # formula values for the historical target during inference.
     workbook = load_workbook(input_path)
     if workbook.calculation is None:
-        workbook.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
+        workbook.calculation = CalcProperties(
+            calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True
+        )
     else:
         workbook.calculation.fullCalcOnLoad = True
         workbook.calculation.forceFullCalc = True
     values_workbook = load_workbook(input_path, data_only=True)
     predictor = T0DemandPredictor(device=device)
     rows_written = 0
-    for worksheet, values_worksheet in zip(workbook.worksheets, values_workbook.worksheets, strict=True):
+    for worksheet, values_worksheet in zip(
+        workbook.worksheets, values_workbook.worksheets, strict=True
+    ):
         columns = _headers(worksheet)
         dishes = _dish_columns(columns)
-        histories, historical_covariates, last_date = _historical_rows(values_worksheet, columns, dishes)
+        histories, historical_covariates, last_date = _historical_rows(
+            values_worksheet, columns, dishes
+        )
         future_dates, future_covariates = _future_covariates(last_date, days)
-        forecast = predictor.predict_many(histories, historical_covariates, future_covariates)
+        forecast = predictor.predict_many(
+            histories, historical_covariates, future_covariates
+        )
         _append_rows(worksheet, columns, dishes, future_dates, forecast.median)
         rows_written += days
     _atomic_save(workbook, output_path)
